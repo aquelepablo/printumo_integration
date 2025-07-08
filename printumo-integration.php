@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Printumo Integration
  * Description: Handles WooCommerce order status changes to send orders to Printumo API, and provides tools to fetch Printumo data.
- * Version: 1.3.0
+ * Version: 1.3.1
  * Author: Seu Nome
  * Author URI: https://seusite.com
  * License: GPL-2.0+
@@ -617,7 +617,15 @@ function printumo_tools_page_content() {
                                 }
                             },
                             error: function(jqXHR, textStatus, errorThrown) {
-                                $resultsDiv.text('AJAX Error: ' + textStatus + ' - ' + errorThrown + ' - ' + (jqXHR.responseJSON ? jqXHR.responseJSON.message : ''));
+                                // Updated to show full responseText
+                                var errorMessage = 'AJAX Error: ' + textStatus + ' - ' + errorThrown + '\n';
+                                if (jqXHR.responseJSON && jqXHR.responseJSON.message) {
+                                    errorMessage += 'Server Message: ' + jqXHR.responseJSON.message + '\n';
+                                }
+                                if (jqXHR.responseText) {
+                                    errorMessage += 'Full Response: ' + jqXHR.responseText;
+                                }
+                                $resultsDiv.text(errorMessage);
                             },
                             complete: function() {
                                 $button.prop('disabled', false);
@@ -646,7 +654,15 @@ function printumo_tools_page_content() {
                                 }
                             },
                             error: function(jqXHR, textStatus, errorThrown) {
-                                $resultsDiv.text('AJAX Error: ' + textStatus + ' - ' + errorThrown + ' - ' + (jqXHR.responseJSON ? jqXHR.responseJSON.message : ''));
+                                // Updated to show full responseText
+                                var errorMessage = 'AJAX Error: ' + textStatus + ' - ' + errorThrown + '\n';
+                                if (jqXHR.responseJSON && jqXHR.responseJSON.message) {
+                                    errorMessage += 'Server Message: ' + jqXHR.responseJSON.message + '\n';
+                                }
+                                if (jqXHR.responseText) {
+                                    errorMessage += 'Full Response: ' + jqXHR.responseText;
+                                }
+                                $resultsDiv.text(errorMessage);
                             },
                             complete: function() {
                                 $button.prop('disabled', false);
