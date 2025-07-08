@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Printumo Integration
  * Description: Handles WooCommerce order status changes to send orders to Printumo API, and provides tools to fetch Printumo data.
- * Version: 1.4.1
+ * Version: 1.5.0
  * Author: Pablo Nunes Alves
  * Author URI: https://seusite.com
  * License: GPL-2.0+
@@ -17,23 +17,23 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // ====================================================================
-// CONFIGURAÇÕES BÁSICAS DA API (URLs)
+// BASIC API CONFIGURATION (URLs)
 // ====================================================================
 
-// URL base da API da Printumo
+// Base URL for the Printumo API
 define( 'PRINTUMO_BASE_API_URL', 'https://printumo.com/api/v1' );
 
-// URL do endpoint de criação de pedidos da Printumo
+// URL for Printumo order creation endpoint
 define( 'PRINTUMO_ORDERS_API_URL', PRINTUMO_BASE_API_URL . '/orders' );
 
-// URL do endpoint de produtos da Printumo
+// URL for Printumo products endpoint
 define( 'PRINTUMO_PRODUCTS_API_URL', PRINTUMO_BASE_API_URL . '/products' );
 
-// URL do endpoint de perfis de envio da Printumo
+// URL for Printumo shipping profiles endpoint
 define( 'PRINTUMO_SHIPPING_PROFILES_API_URL', PRINTUMO_BASE_API_URL . '/shipping_profiles' );
 
 // ====================================================================
-// ATIVAÇÃO DO PLUGIN - CRIAÇÃO DA TABELA DE LOGS DE ERRO
+// PLUGIN ACTIVATION - ERROR LOG TABLE CREATION
 // ====================================================================
 
 /**
@@ -62,7 +62,7 @@ function printumo_activate_plugin() {
 register_activation_hook( __FILE__, 'printumo_activate_plugin' );
 
 // ====================================================================
-// FUNÇÃO PARA REGISTRAR ERROS NO BANCO DE DADOS
+// FUNCTION TO LOG ERRORS TO THE DATABASE
 // ====================================================================
 
 /**
@@ -90,14 +90,14 @@ function printumo_log_error( $type, $message, $details = array() ) {
 
 
 // ====================================================================
-// REGISTRO DOS ENDPOINTS REST PARA OS WEBHOOKS E FERRAMENTAS
+// REGISTER REST ENDPOINTS FOR WEBHOOKS AND TOOLS
 // ====================================================================
 
 /**
  * Registers custom REST API endpoints for WooCommerce webhooks and Printumo data fetching.
  */
 function printumo_register_api_endpoints() {
-    // Endpoint para receber o webhook de atualização de status do pedido do WooCommerce
+    // Endpoint to receive WooCommerce order status update webhook
     register_rest_route( 'printumo/v1', '/webhook', array(
         'methods'             => 'POST',
         'callback'            => 'printumo_handle_webhook_data',
@@ -246,7 +246,7 @@ function printumo_register_api_endpoints() {
         return true; // If all checks pass
     };
 
-    // Endpoint para buscar produtos da Printumo (acionado via admin)
+    // Endpoint to fetch products from Printumo (triggered via admin)
     register_rest_route( 'printumo/v1', '/fetch-products', array(
         'methods'             => 'GET',
         'callback'            => 'printumo_fetch_products_from_api',
@@ -256,7 +256,7 @@ function printumo_register_api_endpoints() {
         ),
     ));
 
-    // Endpoint para buscar perfis de envio da Printumo (acionado via admin)
+    // Endpoint to fetch shipping profiles from Printumo (triggered via admin)
     register_rest_route( 'printumo/v1', '/fetch-shipping-profiles', array(
         'methods'             => 'GET',
         'callback'            => 'printumo_fetch_shipping_profiles_from_api',
@@ -265,11 +265,21 @@ function printumo_register_api_endpoints() {
             // Nonce is now handled directly in permission_callback, no need to define here as required param
         ),
     ));
+
+    // NEW: Endpoint to sync shipping data to WooCommerce
+    register_rest_route( 'printumo/v1', '/sync-shipping-data', array(
+        'methods'             => 'POST', // Use POST as it modifies data
+        'callback'            => 'printumo_sync_shipping_data_to_woocommerce',
+        'permission_callback' => $admin_permission_callback,
+        'args'                => array(
+            // No specific args expected in the request body for now, as it fetches data internally
+        ),
+    ));
 }
 add_action( 'rest_api_init', 'printumo_register_api_endpoints' );
 
 // ====================================================================
-// FUNÇÃO PARA LIDAR COM OS DADOS DO WEBHOOK (CRIAÇÃO DE PEDIDOS)
+// FUNCTION TO HANDLE WEBHOOK DATA (ORDER CREATION)
 // ====================================================================
 
 /**
@@ -413,7 +423,7 @@ function printumo_handle_webhook_data( WP_REST_Request $request ) {
 }
 
 // ====================================================================
-// FUNÇÕES PARA BUSCAR DADOS DA PRINTUMO (PRODUTOS E PERFIS DE ENVIO)
+// FUNCTIONS TO FETCH DATA FROM PRINTUMO (PRODUCTS AND SHIPPING PROFILES)
 // ====================================================================
 
 /**
@@ -507,7 +517,227 @@ function printumo_fetch_shipping_profiles_from_api( WP_REST_Request $request ) {
 }
 
 // ====================================================================
-// FUNCIONALIDADES ADICIONAIS (OPCIONAIS, MAS ALTAMENTE RECOMENDADAS)
+// NEW: FUNCTION TO SYNC SHIPPING DATA TO WOOCOMMERCE
+// ====================================================================
+
+/**
+ * Syncs shipping profiles from Printumo to WooCommerce as Shipping Zones and Shipping Classes.
+ *
+ * @param WP_REST_Request $request The REST API request object.
+ * @return WP_REST_Response A response indicating success or failure of the sync.
+ */
+function printumo_sync_shipping_data_to_woocommerce( WP_REST_Request $request ) {
+    // Ensure WooCommerce is active
+    if ( ! class_exists( 'WooCommerce' ) ) {
+        $message = 'WooCommerce is not active. Shipping sync requires WooCommerce.';
+        printumo_log_error( 'woocommerce_not_active', $message );
+        return new WP_REST_Response( array( 'success' => false, 'message' => $message ), 400 );
+    }
+
+    // Fetch latest shipping profiles from Printumo
+    $response = printumo_fetch_shipping_profiles_from_api( $request ); // Re-use the existing fetch function
+    $response_data = $response->get_data();
+
+    if ( ! $response_data['success'] ) {
+        $message = 'Failed to fetch shipping profiles from Printumo: ' . $response_data['message'];
+        printumo_log_error( 'sync_fetch_error', $message, $response_data );
+        return new WP_REST_Response( array( 'success' => false, 'message' => $message ), 500 );
+    }
+
+    $printumo_profiles = $response_data['data'];
+    $sync_results = array(
+        'zones_created_updated'  => 0,
+        'classes_created_updated' => 0,
+        'errors'                 => array(),
+    );
+
+    // --- Process Shipping Zones ---
+    $wc_shipping_zones = WC_Shipping_Zones::get_zones();
+    $existing_wc_zone_names = array_column( $wc_shipping_zones, 'zone_name', 'zone_id' );
+    $existing_wc_zone_slugs = array(); // To map Printumo market slug to WC zone ID
+    foreach ( $wc_shipping_zones as $zone ) {
+        $existing_wc_zone_slugs[ sanitize_title( $zone['zone_name'] ) ] = $zone['zone_id'];
+    }
+
+    foreach ( $printumo_profiles as $profile ) {
+        $market_name = $profile['market']['name'];
+        $market_slug = $profile['market']['slug'];
+        $market_default_currency = $profile['market']['default_currency'];
+        $market_regions = isset( $profile['shipping_costs'][0]['shipping_zone']['regions'] ) ? $profile['shipping_costs'][0]['shipping_zone']['regions'] : array();
+
+        // Try to find an existing zone by slug or name
+        $zone_id = false;
+        if ( isset( $existing_wc_zone_slugs[ $market_slug ] ) ) {
+            $zone_id = $existing_wc_zone_slugs[ $market_slug ];
+        } else {
+            // Fallback: check by name if slug didn't match (less reliable but good for existing manual zones)
+            foreach ( $wc_shipping_zones as $zone_data ) {
+                if ( $zone_data['zone_name'] === $market_name ) {
+                    $zone_id = $zone_data['zone_id'];
+                    break;
+                }
+            }
+        }
+
+        $zone = null;
+        if ( $zone_id ) {
+            $zone = new WC_Shipping_Zone( $zone_id );
+            error_log( "Printumo Sync: Found existing shipping zone: {$market_name} (ID: {$zone_id})" );
+        } else {
+            // Create new zone
+            $zone_args = array(
+                'zone_name' => $market_name,
+            );
+            $zone_id = WC_Shipping_Zones::add_zone( $zone_args );
+            if ( $zone_id ) {
+                $zone = new WC_Shipping_Zone( $zone_id );
+                error_log( "Printumo Sync: Created new shipping zone: {$market_name} (ID: {$zone_id})" );
+                $sync_results['zones_created_updated']++;
+            } else {
+                $sync_results['errors'][] = "Failed to create shipping zone for market: {$market_name}";
+                printumo_log_error( 'shipping_zone_creation_error', "Failed to create shipping zone: {$market_name}", array( 'market_data' => $profile['market'] ) );
+                continue; // Skip to next profile if zone creation failed
+            }
+        }
+
+        // Update zone locations (countries/provinces)
+        $zone_locations = array();
+        foreach ( $market_regions as $region ) {
+            // WooCommerce expects 'country_code:province_code' for provinces, or 'country_code' for countries
+            if ( ! empty( $region['province_code'] ) ) {
+                $zone_locations[] = array(
+                    'code' => $region['country_code'] . ':' . $region['province_code'],
+                    'type' => 'state',
+                );
+            } else {
+                $zone_locations[] = array(
+                    'code' => $region['country_code'],
+                    'type' => 'country',
+                );
+            }
+        }
+        // Remove existing locations first to prevent duplicates or stale data
+        $zone->delete_zone_locations();
+        foreach ( $zone_locations as $location ) {
+            $zone->add_location( $location['code'], $location['type'] );
+        }
+        error_log( "Printumo Sync: Updated locations for zone {$market_name} (ID: {$zone_id})" );
+
+
+        // --- Add/Update Flat Rate Shipping Method ---
+        $flat_rate_method_id = 'flat_rate'; // Standard WooCommerce Flat Rate method ID
+        $methods = $zone->get_shipping_methods();
+        $flat_rate_exists = false;
+        foreach ( $methods as $method ) {
+            if ( $method->id === $flat_rate_method_id ) {
+                $flat_rate_exists = true;
+                // Update existing Flat Rate method
+                $method->set_option( 'title', __( 'Printumo Flat Rate', 'printumo-integration' ) );
+                $method->set_option( 'tax_status', 'taxable' ); // Or 'none' based on your preference
+                // Set a base cost. For now, we'll use the first shipping cost found for this profile.
+                // A more advanced mapping for additional_unit_price would go here.
+                $base_cost = 0;
+                if ( isset( $profile['shipping_costs'][0]['price']['amount'] ) ) {
+                    $base_cost = wc_format_decimal( $profile['shipping_costs'][0]['price']['amount'] / 100, 2 ); // Convert cents to dollars/euros
+                }
+                $method->set_option( 'cost', $base_cost );
+                $method->save();
+                error_log( "Printumo Sync: Updated Flat Rate method for zone {$market_name} (ID: {$zone_id}) with base cost: {$base_cost} {$market_default_currency}" );
+                break;
+            }
+        }
+
+        if ( ! $flat_rate_exists ) {
+            // Add new Flat Rate method
+            $instance_id = $zone->add_shipping_method( $flat_rate_method_id );
+            if ( $instance_id ) {
+                $new_method = $zone->get_shipping_method( $instance_id );
+                $new_method->set_option( 'title', __( 'Printumo Flat Rate', 'printumo-integration' ) );
+                $new_method->set_option( 'tax_status', 'taxable' );
+                $base_cost = 0;
+                if ( isset( $profile['shipping_costs'][0]['price']['amount'] ) ) {
+                    $base_cost = wc_format_decimal( $profile['shipping_costs'][0]['price']['amount'] / 100, 2 );
+                }
+                $new_method->set_option( 'cost', $base_cost );
+                $new_method->save();
+                error_log( "Printumo Sync: Added new Flat Rate method for zone {$market_name} (ID: {$zone_id}) with base cost: {$base_cost} {$market_default_currency}" );
+            } else {
+                $sync_results['errors'][] = "Failed to add Flat Rate method to zone: {$market_name}";
+                printumo_log_error( 'shipping_method_creation_error', "Failed to add Flat Rate method to zone: {$market_name}", array( 'zone_id' => $zone_id ) );
+            }
+        }
+    }
+
+    // --- Process Shipping Classes ---
+    $existing_wc_shipping_classes = WC_Shipping_Classes::get_shipping_classes();
+    $existing_wc_class_slugs = array_column( $existing_wc_shipping_classes, 'slug', 'term_id' );
+    $existing_wc_class_names = array_column( $existing_wc_shipping_classes, 'name', 'term_id' );
+
+    $unique_printumo_shipping_classes = array(); // Stores unique combinations of print_type and size
+    foreach ( $printumo_profiles as $profile ) {
+        $print_type_name = $profile['print_type']['name'];
+        foreach ( $profile['sizes'] as $size ) {
+            $size_name = $size['name'];
+            $class_name = $print_type_name . ' - ' . $size_name;
+            $class_slug = sanitize_title( $class_name );
+            $unique_printumo_shipping_classes[ $class_slug ] = $class_name;
+        }
+    }
+
+    foreach ( $unique_printumo_shipping_classes as $slug => $name ) {
+        $class_id = false;
+        // Check if class exists by slug
+        if ( in_array( $slug, $existing_wc_class_slugs ) ) {
+            $class_id = array_search( $slug, $existing_wc_class_slugs );
+            error_log( "Printumo Sync: Found existing shipping class: {$name} (ID: {$class_id})" );
+        } else {
+            // Check if class exists by name (less reliable but good for existing manual classes)
+            foreach( $existing_wc_shipping_classes as $class_data ) {
+                if ( $class_data->name === $name ) {
+                    $class_id = $class_data->term_id;
+                    break;
+                }
+            }
+        }
+
+        if ( ! $class_id ) {
+            // Create new shipping class
+            $new_class_id = wp_insert_term(
+                $name, // The class name
+                'product_shipping_class', // Taxonomy
+                array(
+                    'description' => sprintf( __( 'Printumo shipping class for %s.', 'printumo-integration' ), $name ),
+                    'slug'        => $slug,
+                )
+            );
+
+            if ( ! is_wp_error( $new_class_id ) ) {
+                error_log( "Printumo Sync: Created new shipping class: {$name} (ID: {$new_class_id['term_id']})" );
+                $sync_results['classes_created_updated']++;
+            } else {
+                $sync_results['errors'][] = "Failed to create shipping class: {$name} - " . $new_class_id->get_error_message();
+                printumo_log_error( 'shipping_class_creation_error', "Failed to create shipping class: {$name}", array( 'class_name' => $name, 'error' => $new_class_id->get_error_message() ) );
+            }
+        }
+    }
+
+    $message = sprintf(
+        __( 'Shipping sync complete. Zones created/updated: %d. Classes created/updated: %d.', 'printumo-integration' ),
+        $sync_results['zones_created_updated'],
+        $sync_results['classes_created_updated']
+    );
+
+    if ( ! empty( $sync_results['errors'] ) ) {
+        $message .= ' ' . __( 'Some errors occurred. Check the error log for details.', 'printumo-integration' );
+        return new WP_REST_Response( array( 'success' => false, 'message' => $message, 'details' => $sync_results ), 500 );
+    }
+
+    return new WP_REST_Response( array( 'success' => true, 'message' => $message, 'details' => $sync_results ), 200 );
+}
+
+
+// ====================================================================
+// ADDITIONAL FUNCTIONALITY (OPTIONAL, BUT HIGHLY RECOMMENDED)
 // ====================================================================
 
 /**
@@ -572,7 +802,7 @@ add_filter( 'wc_order_statuses', 'printumo_add_custom_order_status_to_list' );
 */
 
 // ====================================================================
-// PÁGINA DE ADMINISTRAÇÃO E CONFIGURAÇÕES DO PLUGIN
+// ADMIN PAGE AND PLUGIN SETTINGS
 // ====================================================================
 
 /**
@@ -688,6 +918,7 @@ function printumo_tools_page_content() {
         <h2 class="nav-tab-wrapper">
             <a href="?page=printumo-tools&tab=settings" class="nav-tab <?php echo ( ! isset( $_GET['tab'] ) || $_GET['tab'] == 'settings' ) ? 'nav-tab-active' : ''; ?>"><?php _e( 'Settings', 'printumo-integration' ); ?></a>
             <a href="?page=printumo-tools&tab=tools" class="nav-tab <?php echo ( isset( $_GET['tab'] ) && $_GET['tab'] == 'tools' ) ? 'nav-tab-active' : ''; ?>"><?php _e( 'Tools', 'printumo-integration' ); ?></a>
+            <a href="?page=printumo-tools&tab=shipping-sync" class="nav-tab <?php echo ( isset( $_GET['tab'] ) && $_GET['tab'] == 'shipping-sync' ) ? 'nav-tab-active' : ''; ?>"><?php _e( 'Shipping Sync', 'printumo-integration' ); ?></a>
             <a href="?page=printumo-tools&tab=error-log" class="nav-tab <?php echo ( isset( $_GET['tab'] ) && $_GET['tab'] == 'error-log' ) ? 'nav-tab-active' : ''; ?>"><?php _e( 'Error Log', 'printumo-integration' ); ?></a>
         </h2>
 
@@ -783,6 +1014,55 @@ function printumo_tools_page_content() {
                                     $resultsDiv.text(JSON.stringify(response.data, null, 2));
                                 } else {
                                     $resultsDiv.text('Error: ' + response.message);
+                                }
+                            },
+                            error: function(jqXHR, textStatus, errorThrown) {
+                                var errorMessage = 'AJAX Error: ' + textStatus + ' - ' + errorThrown + '\n';
+                                if (jqXHR.responseJSON && jqXHR.responseJSON.message) {
+                                    errorMessage += 'Server Message: ' + jqXHR.responseJSON.message + '\n';
+                                }
+                                if (jqXHR.responseText) {
+                                    errorMessage += 'Full Response: ' + jqXHR.responseText;
+                                }
+                                $resultsDiv.text(errorMessage);
+                            },
+                            complete: function() {
+                                $button.prop('disabled', false);
+                            }
+                        });
+                    });
+                });
+            </script>
+            <?php
+        } elseif ( 'shipping-sync' == $active_tab ) {
+            ?>
+            <hr>
+            <h2><?php _e( 'Sync Shipping Data to WooCommerce', 'printumo-integration' ); ?></h2>
+            <p><?php _e( 'This tool will automatically create or update WooCommerce Shipping Zones and Shipping Classes based on your Printumo shipping profiles.', 'printumo-integration' ); ?></p>
+            <p><strong><?php _e( 'Important:', 'printumo-integration' ); ?></strong> <?php _e( 'This operation will modify your WooCommerce shipping settings. It will create new shipping zones and classes if they do not exist, and update existing ones with matching names/slugs. Existing shipping methods within zones will be updated with a base "Printumo Flat Rate" method.', 'printumo-integration' ); ?></p>
+            <button id="printumo-sync-shipping-data" class="button button-primary"><?php _e( 'Sync Shipping Data to WooCommerce', 'printumo-integration' ); ?></button>
+            <div id="printumo-sync-results" style="margin-top: 20px; background-color: #f0f0f0; padding: 15px; border-radius: 5px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;">
+                <?php _e( 'Sync results will appear here.', 'printumo-integration' ); ?>
+            </div>
+
+            <script type="text/javascript">
+                jQuery(document).ready(function($) {
+                    var wp_nonce = '<?php echo wp_create_nonce( 'wp_rest' ); ?>';
+
+                    $('#printumo-sync-shipping-data').on('click', function() {
+                        var $button = $(this);
+                        var $resultsDiv = $('#printumo-sync-results');
+                        $resultsDiv.text('<?php _e( 'Starting synchronization...', 'printumo-integration' ); ?>');
+                        $button.prop('disabled', true);
+
+                        $.ajax({
+                            url: '<?php echo esc_url_raw( rest_url( 'printumo/v1/sync-shipping-data' ) ); ?>' + '?nonce=' + wp_nonce,
+                            method: 'POST',
+                            success: function(response) {
+                                if (response.success) {
+                                    $resultsDiv.text('<?php _e( 'Sync successful!', 'printumo-integration' ); ?>\n' + JSON.stringify(response.message, null, 2) + '\n' + JSON.stringify(response.details, null, 2));
+                                } else {
+                                    $resultsDiv.text('<?php _e( 'Sync failed!', 'printumo-integration' ); ?>\n' + JSON.stringify(response.message, null, 2) + '\n' + JSON.stringify(response.details, null, 2));
                                 }
                             },
                             error: function(jqXHR, textStatus, errorThrown) {
