@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Printumo Integration
  * Description: Handles WooCommerce order status changes to send orders to Printumo API, and provides tools to fetch Printumo data.
- * Version: 1.3.1
+ * Version: 1.3.2
  * Author: Seu Nome
  * Author URI: https://seusite.com
  * License: GPL-2.0+
@@ -110,7 +110,10 @@ function printumo_register_api_endpoints() {
     register_rest_route( 'printumo/v1', '/fetch-products', array(
         'methods'             => 'GET',
         'callback'            => 'printumo_fetch_products_from_api',
-        'permission_callback' => 'current_user_can', // Requires user to be logged in and have 'manage_options' capability
+        // CORRECTED: Use an anonymous function to properly call current_user_can
+        'permission_callback' => function() {
+            return current_user_can( 'manage_options' );
+        },
         'args'                => array(
             'nonce' => array(
                 'validate_callback' => function( $param, $request, $key ) {
@@ -125,7 +128,10 @@ function printumo_register_api_endpoints() {
     register_rest_route( 'printumo/v1', '/fetch-shipping-profiles', array(
         'methods'             => 'GET',
         'callback'            => 'printumo_fetch_shipping_profiles_from_api',
-        'permission_callback' => 'current_user_can', // Requires user to be logged in and have 'manage_options' capability
+        // CORRECTED: Use an anonymous function to properly call current_user_can
+        'permission_callback' => function() {
+            return current_user_can( 'manage_options' );
+        },
         'args'                => array(
             'nonce' => array(
                 'validate_callback' => function( $param, $request, $key ) {
