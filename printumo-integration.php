@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Printumo Integration
  * Description: Handles WooCommerce order status changes to send orders to Printumo API, and provides tools to fetch Printumo data.
- * Version: 1.3.5
- * Author: Seu Nome
+ * Version: 1.4.1
+ * Author: Pablo Nunes Alves
  * Author URI: https://seusite.com
  * License: GPL-2.0+
  * License URI: http://www.gnu.org/licenses/gpl-2.0.txt
@@ -108,18 +108,132 @@ function printumo_register_api_endpoints() {
 
     // Permission callback for admin-only endpoints with nonce verification
     $admin_permission_callback = function( WP_REST_Request $request ) {
-        // 1. Check user capability
-        if ( ! current_user_can( 'manage_options' ) ) {
+        error_log( '--- Printumo REST API Permission Check Start ---' );
+
+        // Log relevant $_SERVER variables
+        error_log( 'Printumo REST API Permission Check: $_SERVER[HTTP_HOST]: ' . ( isset( $_SERVER['HTTP_HOST'] ) ? $_SERVER['HTTP_HOST'] : 'N/A' ) );
+        error_log( 'Printumo REST API Permission Check: $_SERVER[SERVER_NAME]: ' . ( isset( $_SERVER['SERVER_NAME'] ) ? $_SERVER['SERVER_NAME'] : 'N/A' ) );
+        error_log( 'Printumo REST API Permission Check: $_SERVER[REQUEST_URI]: ' . ( isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : 'N/A' ) );
+        error_log( 'Printumo REST API Permission Check: $_SERVER[SCRIPT_NAME]: ' . ( isset( $_SERVER['SCRIPT_NAME'] ) ? $_SERVER['SCRIPT_NAME'] : 'N/A' ) );
+        error_log( 'Printumo REST API Permission Check: $_SERVER[PHP_SELF]: ' . ( isset( $_SERVER['PHP_SELF'] ) ? $_SERVER['PHP_SELF'] : 'N/A' ) );
+        error_log( 'Printumo REST API Permission Check: $_SERVER[HTTPS]: ' . ( isset( $_SERVER['HTTPS'] ) ? $_SERVER['HTTPS'] : 'N/A' ) );
+        error_log( 'Printumo REST API Permission Check: $_SERVER[SERVER_PORT]: ' . ( isset( $_SERVER['SERVER_PORT'] ) ? $_SERVER['SERVER_PORT'] : 'N/A' ) );
+        error_log( 'Printumo REST API Permission Check: get_option(siteurl): ' . get_option( 'siteurl' ) );
+        error_log( 'Printumo REST API Permission Check: get_option(home): ' . get_option( 'home' ) );
+
+
+        // Log all cookies received
+        error_log( 'Printumo REST API Permission Check: Received Cookies: ' . print_r( $_COOKIE, true ) );
+
+        // Check if user is logged in using WordPress's internal function (before potential manual set)
+        $is_logged_in_before = is_user_logged_in();
+        error_log( 'Printumo REST API Permission Check: is_user_logged_in() BEFORE potential manual set: ' . ( $is_logged_in_before ? 'Yes' : 'No' ) );
+
+        // Get the current user object (before potential manual set)
+        $user_before = wp_get_current_user();
+        error_log( 'Printumo REST API Permission Check: User ID from wp_get_current_user() BEFORE potential manual set: ' . ( $user_before ? $user_before->ID : 'N/A' ) . ' | User Exists: ' . ( $user_before && $user_before->exists() ? 'Yes' : 'No' ) );
+
+        // Validate authentication cookie explicitly
+        $auth_cookie = '';
+        $auth_cookie_name = '';
+        foreach ( $_COOKIE as $name => $value ) {
+            if ( strpos( $name, 'wordpress_logged_in_' ) === 0 ) {
+                $auth_cookie_name = $name;
+                $auth_cookie = $value;
+                break;
+            }
+        }
+        $valid_auth_cookie_user_id = wp_validate_auth_cookie( $auth_cookie, 'logged_in' );
+        error_log( 'Printumo REST API Permission Check: Auth Cookie Name: ' . ( $auth_cookie_name ? $auth_cookie_name : 'N/A' ) );
+        error_log( 'Printumo REST API Permission Check: wp_validate_auth_cookie result (User ID): ' . ( $valid_auth_cookie_user_id ? $valid_auth_cookie_user_id : 'Invalid/Missing' ) );
+
+        // --- Core Fix for Authentication Discrepancy ---
+        // If wp_validate_auth_cookie returns a valid user ID, but wp_get_current_user() doesn't
+        // recognize the user, it means the global user state hasn't been set for this request.
+        // We need to manually set it.
+        if ( $valid_auth_cookie_user_id && ( ! $user_before || ! $user_before->exists() || $user_before->ID != $valid_auth_cookie_user_id ) ) {
+            error_log( 'Printumo REST API Permission Check: Manually setting current user based on valid auth cookie: User ID ' . $valid_auth_cookie_user_id );
+            wp_set_current_user( $valid_auth_cookie_user_id );
+            // Note: wp_set_auth_cookie is not needed here as the cookie is already sent by the browser.
+            // wp_set_current_user is enough to set the global $current_user for this request.
+
+            // Re-get the user and logged in status after setting
+            $user = wp_get_current_user();
+            $is_logged_in = is_user_logged_in();
+            error_log( 'Printumo REST API Permission Check: is_user_logged_in() AFTER manual set: ' . ( $is_logged_in ? 'Yes' : 'No' ) );
+            error_log( 'Printumo REST API Permission Check: User ID from wp_get_current_user() AFTER manual set: ' . ( $user ? $user->ID : 'N/A' ) . ' | User Exists: ' . ( $user && $user->exists() ? 'Yes' : 'No' ) );
+        } else {
+            // If no manual set was needed, use the initial user object
+            $user = $user_before;
+            $is_logged_in = $is_logged_in_before;
+        }
+        // --- End Core Fix ---
+
+
+        // 1. Check if user is logged in and exists (using the potentially updated $user object)
+        if ( ! $user || ! $user->exists() || ! $is_logged_in ) {
+            $user_id_for_log = $user ? $user->ID : 'N/A'; // Capture user ID even if not existing
+            error_log( 'Printumo REST API Permission Check: Final check: User not logged in or does not exist. Returning 401. User ID seen: ' . $user_id_for_log );
+            printumo_log_error(
+                'rest_auth_error',
+                __( 'User not logged in to access admin endpoint.', 'printumo-integration' ),
+                array(
+                    'user_id'           => $user_id_for_log,
+                    'endpoint'          => $request->get_route(),
+                    'is_logged_in_func' => $is_logged_in,
+                    'auth_cookie_valid' => $valid_auth_cookie_user_id,
+                    'cookies_received'  => $_COOKIE, // Log all cookies for debugging
+                    'server_vars'       => array(
+                        'HTTP_HOST'   => isset( $_SERVER['HTTP_HOST'] ) ? $_SERVER['HTTP_HOST'] : 'N/A',
+                        'SERVER_NAME' => isset( $_SERVER['SERVER_NAME'] ) ? $_SERVER['SERVER_NAME'] : 'N/A',
+                        'REQUEST_URI' => isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : 'N/A',
+                        'HTTPS'       => isset( $_SERVER['HTTPS'] ) ? $_SERVER['HTTPS'] : 'N/A',
+                        'SERVER_PORT' => isset( $_SERVER['SERVER_PORT'] ) ? $_SERVER['SERVER_PORT'] : 'N/A',
+                    ),
+                    'wp_urls'           => array(
+                        'siteurl' => get_option( 'siteurl' ),
+                        'home'    => get_option( 'home' ),
+                    ),
+                )
+            );
+            error_log( '--- Printumo REST API Permission Check End (401) ---' );
             return new WP_Error(
-                'rest_forbidden',
-                __( 'You do not have permission to access this endpoint.', 'printumo-integration' ),
-                array( 'status' => rest_authorization_required_code() )
+                'rest_not_logged_in',
+                __( 'You must be logged in to access this endpoint.', 'printumo-integration' ),
+                array( 'status' => 401 ) // 401 Unauthorized
             );
         }
 
-        // 2. Get and verify nonce
+        error_log( 'Printumo REST API Permission Check: User capabilities: ' . print_r( $user->allcaps, true ) );
+
+        // 2. Check user capability
+        if ( ! $user->has_cap( 'manage_options' ) ) { // Use has_cap() on the user object
+            error_log( 'Printumo REST API Permission Check: User does not have manage_options capability. Returning 403.' );
+            printumo_log_error(
+                'rest_permission_error',
+                __( 'User lacks required capability for admin endpoint.', 'printumo-integration' ),
+                array( 'user_id' => $user->ID, 'endpoint' => $request->get_route(), 'capabilities' => $user->allcaps )
+            );
+            error_log( '--- Printumo REST API Permission Check End (403 - Capability) ---' );
+            return new WP_Error(
+                'rest_forbidden_capability',
+                __( 'You do not have sufficient permissions to access this endpoint.', 'printumo-integration' ),
+                array( 'status' => 403 ) // 403 Forbidden
+            );
+        }
+
+        // 3. Get and verify nonce
         $nonce = $request->get_param( 'nonce' ); // Get nonce from query parameter
+        error_log( 'Printumo REST API Permission Check: Nonce received: ' . ( $nonce ? 'Yes' : 'No' ) . ' | Nonce value: ' . ( $nonce ? $nonce : 'N/A' ) );
+
         if ( ! wp_verify_nonce( $nonce, 'wp_rest' ) ) {
+            error_log( 'Printumo REST API Permission Check: Invalid nonce. Returning 403.' );
+            printumo_log_error(
+                'rest_nonce_error',
+                __( 'Invalid nonce for admin endpoint.', 'printumo-integration' ),
+                array( 'user_id' => $user->ID, 'endpoint' => $request->get_route(), 'nonce_value' => $nonce )
+            );
+            error_log( '--- Printumo REST API Permission Check End (403 - Nonce) ---' );
             return new WP_Error(
                 'rest_nonce_invalid',
                 __( 'Invalid nonce.', 'printumo-integration' ),
@@ -127,7 +241,9 @@ function printumo_register_api_endpoints() {
             );
         }
 
-        return true; // If both capability and nonce are valid
+        error_log( 'Printumo REST API Permission Check: All permission checks passed. Access granted.' );
+        error_log( '--- Printumo REST API Permission Check End (Success) ---' );
+        return true; // If all checks pass
     };
 
     // Endpoint para buscar produtos da Printumo (acionado via admin)
@@ -137,12 +253,6 @@ function printumo_register_api_endpoints() {
         'permission_callback' => $admin_permission_callback, // Use the new combined permission callback
         'args'                => array(
             // Nonce is now handled directly in permission_callback, no need to define here as required param
-            // 'nonce' => array(
-            //     'validate_callback' => function( $param, $request, $key ) {
-            //         return wp_verify_nonce( $param, 'wp_rest' );
-            //     },
-            //     'required' => true,
-            // ),
         ),
     ));
 
@@ -153,12 +263,6 @@ function printumo_register_api_endpoints() {
         'permission_callback' => $admin_permission_callback, // Use the new combined permission callback
         'args'                => array(
             // Nonce is now handled directly in permission_callback, no need to define here as required param
-            // 'nonce' => array(
-            //     'validate_callback' => function( $param, $request, $key ) {
-            //         return wp_verify_nonce( $param, 'wp_rest' );
-            //     },
-            //     'required' => true,
-            // ),
         ),
     ));
 }
