@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Printumo Integration
  * Description: Handles WooCommerce order status changes to send orders to Printumo API, and provides tools to fetch Printumo data.
- * Version: 1.3.2
+ * Version: 1.3.3
  * Author: Seu Nome
  * Author URI: https://seusite.com
  * License: GPL-2.0+
@@ -115,7 +115,7 @@ function printumo_register_api_endpoints() {
             return current_user_can( 'manage_options' );
         },
         'args'                => array(
-            'nonce' => array(
+            'nonce' => array( // Nonce is expected as a query parameter for GET requests
                 'validate_callback' => function( $param, $request, $key ) {
                     return wp_verify_nonce( $param, 'wp_rest' );
                 },
@@ -133,7 +133,7 @@ function printumo_register_api_endpoints() {
             return current_user_can( 'manage_options' );
         },
         'args'                => array(
-            'nonce' => array(
+            'nonce' => array( // Nonce is expected as a query parameter for GET requests
                 'validate_callback' => function( $param, $request, $key ) {
                     return wp_verify_nonce( $param, 'wp_rest' );
                 },
@@ -602,6 +602,9 @@ function printumo_tools_page_content() {
 
             <script type="text/javascript">
                 jQuery(document).ready(function($) {
+                    // Generate nonce once
+                    var wp_nonce = '<?php echo wp_create_nonce( 'wp_rest' ); ?>';
+
                     // Handle Fetch Products button click
                     $('#printumo-fetch-products').on('click', function() {
                         var $button = $(this);
@@ -610,11 +613,9 @@ function printumo_tools_page_content() {
                         $button.prop('disabled', true);
 
                         $.ajax({
-                            url: '<?php echo esc_url_raw( rest_url( 'printumo/v1/fetch-products' ) ); ?>',
+                            url: '<?php echo esc_url_raw( rest_url( 'printumo/v1/fetch-products' ) ); ?>' + '?nonce=' + wp_nonce, // Added nonce to URL
                             method: 'GET',
-                            beforeSend: function(xhr) {
-                                xhr.setRequestHeader('X-WP-Nonce', '<?php echo wp_create_nonce( 'wp_rest' ); ?>');
-                            },
+                            // No need for beforeSend to set X-WP-Nonce header if sent as URL param
                             success: function(response) {
                                 if (response.success) {
                                     $resultsDiv.text(JSON.stringify(response.data, null, 2));
@@ -623,7 +624,6 @@ function printumo_tools_page_content() {
                                 }
                             },
                             error: function(jqXHR, textStatus, errorThrown) {
-                                // Updated to show full responseText
                                 var errorMessage = 'AJAX Error: ' + textStatus + ' - ' + errorThrown + '\n';
                                 if (jqXHR.responseJSON && jqXHR.responseJSON.message) {
                                     errorMessage += 'Server Message: ' + jqXHR.responseJSON.message + '\n';
@@ -647,11 +647,9 @@ function printumo_tools_page_content() {
                         $button.prop('disabled', true);
 
                         $.ajax({
-                            url: '<?php echo esc_url_raw( rest_url( 'printumo/v1/fetch-shipping-profiles' ) ); ?>',
+                            url: '<?php echo esc_url_raw( rest_url( 'printumo/v1/fetch-shipping-profiles' ) ); ?>' + '?nonce=' + wp_nonce, // Added nonce to URL
                             method: 'GET',
-                            beforeSend: function(xhr) {
-                                xhr.setRequestHeader('X-WP-Nonce', '<?php echo wp_create_nonce( 'wp_rest' ); ?>');
-                            },
+                            // No need for beforeSend to set X-WP-Nonce header if sent as URL param
                             success: function(response) {
                                 if (response.success) {
                                     $resultsDiv.text(JSON.stringify(response.data, null, 2));
@@ -660,7 +658,6 @@ function printumo_tools_page_content() {
                                 }
                             },
                             error: function(jqXHR, textStatus, errorThrown) {
-                                // Updated to show full responseText
                                 var errorMessage = 'AJAX Error: ' + textStatus + ' - ' + errorThrown + '\n';
                                 if (jqXHR.responseJSON && jqXHR.responseJSON.message) {
                                     errorMessage += 'Server Message: ' + jqXHR.responseJSON.message + '\n';
