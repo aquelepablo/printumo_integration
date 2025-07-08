@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Printumo Integration
  * Description: Handles WooCommerce order status changes to send orders to Printumo API, and provides tools to fetch Printumo data.
- * Version: 1.5.0
+ * Version: 1.6.0
  * Author: Pablo Nunes Alves
  * Author URI: https://seusite.com
  * License: GPL-2.0+
@@ -176,7 +176,7 @@ function printumo_register_api_endpoints() {
             error_log( 'Printumo REST API Permission Check: Final check: User not logged in or does not exist. Returning 401. User ID seen: ' . $user_id_for_log );
             printumo_log_error(
                 'rest_auth_error',
-                __( 'User not logged in to access admin endpoint.', 'printumo-integration' ),
+                __( 'You must be logged in to access admin endpoint.', 'printumo-integration' ),
                 array(
                     'user_id'           => $user_id_for_log,
                     'endpoint'          => $request->get_route(),
@@ -496,7 +496,7 @@ function printumo_fetch_shipping_profiles_from_api( WP_REST_Request $request ) {
         $error_message = $response->get_error_message();
         error_log( "Printumo API Connection Error (Shipping Profiles): " . $error_message );
         printumo_log_error( 'api_connection_error', "Failed to connect to Printumo API (Shipping Profiles): " . $error_message, array( 'endpoint' => 'shipping_profiles' ) );
-        return new WP_REST_Response( array( 'success' => false, 'message' => 'Failed to connect to Printumo API (Shipping Profiles): ' . $error_message ), 500 );
+        return new WP_REST_Response( array( 'success' => false, 'message' => 'Failed to connect to Printumo API: ' . $error_message ), 500 );
     }
 
     $body = wp_remote_retrieve_body( $response );
@@ -533,6 +533,27 @@ function printumo_sync_shipping_data_to_woocommerce( WP_REST_Request $request ) 
         printumo_log_error( 'woocommerce_not_active', $message );
         return new WP_REST_Response( array( 'success' => false, 'message' => $message ), 400 );
     }
+
+    // Explicitly include the file where WC_Shipping_Classes is defined.
+    // Based on standard WooCommerce structure, this is usually in includes/ directly.
+    $shipping_classes_file = WC_ABSPATH . 'includes/class-wc-shipping-classes.php';
+    if ( file_exists( $shipping_classes_file ) ) {
+        require_once $shipping_classes_file;
+        error_log('Printumo Sync: Attempted to load WC_Shipping_Classes from: ' . $shipping_classes_file);
+    } else {
+        // If the file is not found here, log an error with the path that was attempted.
+        error_log('Printumo Sync: WC_Shipping_Classes file not found at expected path: ' . $shipping_classes_file);
+    }
+
+    // Now, check if the class exists after attempting to load it.
+    if ( ! class_exists( 'WC_Shipping_Classes' ) ) {
+        $message = 'WooCommerce class WC_Shipping_Classes could not be found. This class is essential for managing shipping classes. Please ensure WooCommerce is fully installed and updated, and that no other plugin is interfering with its core functionalities. (Caminho tentado: ' . $shipping_classes_file . ')';
+        printumo_log_error( 'wc_class_load_error', $message, array('attempted_file' => $shipping_classes_file) );
+        return new WP_REST_Response( array( 'success' => false, 'message' => $message ), 500 );
+    } else {
+        error_log('Printumo Sync: WC_Shipping_Classes is available.');
+    }
+
 
     // Fetch latest shipping profiles from Printumo
     $response = printumo_fetch_shipping_profiles_from_api( $request ); // Re-use the existing fetch function
@@ -573,7 +594,7 @@ function printumo_sync_shipping_data_to_woocommerce( WP_REST_Request $request ) 
             // Fallback: check by name if slug didn't match (less reliable but good for existing manual zones)
             foreach ( $wc_shipping_zones as $zone_data ) {
                 if ( $zone_data['zone_name'] === $market_name ) {
-                    $zone_id = $zone_data['zone_id'];
+                    $zone_id = $zone_data->get_id(); // Use get_id() for WC_Shipping_Zone objects
                     break;
                 }
             }
@@ -584,11 +605,12 @@ function printumo_sync_shipping_data_to_woocommerce( WP_REST_Request $request ) 
             $zone = new WC_Shipping_Zone( $zone_id );
             error_log( "Printumo Sync: Found existing shipping zone: {$market_name} (ID: {$zone_id})" );
         } else {
-            // Create new zone
-            $zone_args = array(
-                'zone_name' => $market_name,
-            );
-            $zone_id = WC_Shipping_Zones::add_zone( $zone_args );
+            // Create new zone using WC_Data_Store
+            $data_store = WC_Data_Store::load( 'shipping-zone' );
+            $zone_obj = new WC_Shipping_Zone();
+            $zone_obj->set_zone_name( $market_name );
+            $zone_id = $data_store->create( $zone_obj ); // This creates and saves the zone, returning its ID
+
             if ( $zone_id ) {
                 $zone = new WC_Shipping_Zone( $zone_id );
                 error_log( "Printumo Sync: Created new shipping zone: {$market_name} (ID: {$zone_id})" );
