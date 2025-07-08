@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Printumo Integration
  * Description: Handles WooCommerce order status changes to send orders to Printumo API, and provides tools to fetch Printumo data.
- * Version: 1.3.3
+ * Version: 1.3.5
  * Author: Seu Nome
  * Author URI: https://seusite.com
  * License: GPL-2.0+
@@ -106,21 +106,43 @@ function printumo_register_api_endpoints() {
         'permission_callback' => '__return_true',
     ));
 
+    // Permission callback for admin-only endpoints with nonce verification
+    $admin_permission_callback = function( WP_REST_Request $request ) {
+        // 1. Check user capability
+        if ( ! current_user_can( 'manage_options' ) ) {
+            return new WP_Error(
+                'rest_forbidden',
+                __( 'You do not have permission to access this endpoint.', 'printumo-integration' ),
+                array( 'status' => rest_authorization_required_code() )
+            );
+        }
+
+        // 2. Get and verify nonce
+        $nonce = $request->get_param( 'nonce' ); // Get nonce from query parameter
+        if ( ! wp_verify_nonce( $nonce, 'wp_rest' ) ) {
+            return new WP_Error(
+                'rest_nonce_invalid',
+                __( 'Invalid nonce.', 'printumo-integration' ),
+                array( 'status' => 403 ) // 403 Forbidden for invalid nonce
+            );
+        }
+
+        return true; // If both capability and nonce are valid
+    };
+
     // Endpoint para buscar produtos da Printumo (acionado via admin)
     register_rest_route( 'printumo/v1', '/fetch-products', array(
         'methods'             => 'GET',
         'callback'            => 'printumo_fetch_products_from_api',
-        // CORRECTED: Use an anonymous function to properly call current_user_can
-        'permission_callback' => function() {
-            return current_user_can( 'manage_options' );
-        },
+        'permission_callback' => $admin_permission_callback, // Use the new combined permission callback
         'args'                => array(
-            'nonce' => array( // Nonce is expected as a query parameter for GET requests
-                'validate_callback' => function( $param, $request, $key ) {
-                    return wp_verify_nonce( $param, 'wp_rest' );
-                },
-                'required' => true,
-            ),
+            // Nonce is now handled directly in permission_callback, no need to define here as required param
+            // 'nonce' => array(
+            //     'validate_callback' => function( $param, $request, $key ) {
+            //         return wp_verify_nonce( $param, 'wp_rest' );
+            //     },
+            //     'required' => true,
+            // ),
         ),
     ));
 
@@ -128,17 +150,15 @@ function printumo_register_api_endpoints() {
     register_rest_route( 'printumo/v1', '/fetch-shipping-profiles', array(
         'methods'             => 'GET',
         'callback'            => 'printumo_fetch_shipping_profiles_from_api',
-        // CORRECTED: Use an anonymous function to properly call current_user_can
-        'permission_callback' => function() {
-            return current_user_can( 'manage_options' );
-        },
+        'permission_callback' => $admin_permission_callback, // Use the new combined permission callback
         'args'                => array(
-            'nonce' => array( // Nonce is expected as a query parameter for GET requests
-                'validate_callback' => function( $param, $request, $key ) {
-                    return wp_verify_nonce( $param, 'wp_rest' );
-                },
-                'required' => true,
-            ),
+            // Nonce is now handled directly in permission_callback, no need to define here as required param
+            // 'nonce' => array(
+            //     'validate_callback' => function( $param, $request, $key ) {
+            //         return wp_verify_nonce( $param, 'wp_rest' );
+            //     },
+            //     'required' => true,
+            // ),
         ),
     ));
 }
@@ -604,6 +624,10 @@ function printumo_tools_page_content() {
                 jQuery(document).ready(function($) {
                     // Generate nonce once
                     var wp_nonce = '<?php echo wp_create_nonce( 'wp_rest' ); ?>';
+
+                    // Add a warning about caching for nonce issues
+                    var $nonceWarning = $('<p style="color: red; font-weight: bold;"><?php _e( 'If you encounter "Invalid nonce" errors, please try clearing your website cache and reloading this page.', 'printumo-integration' ); ?></p>');
+                    $nonceWarning.insertAfter('h2:contains("Fetch Products from Printumo")'); // Add after the first H2 in Tools tab
 
                     // Handle Fetch Products button click
                     $('#printumo-fetch-products').on('click', function() {
