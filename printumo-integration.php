@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Printumo Integration
  * Description: Handles WooCommerce order status changes to send orders to Printumo API, and provides tools to fetch Printumo data.
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: Seu Nome
  * Author URI: https://seusite.com
  * License: GPL-2.0+
@@ -31,6 +31,63 @@ define( 'PRINTUMO_PRODUCTS_API_URL', PRINTUMO_BASE_API_URL . '/products' );
 
 // URL do endpoint de perfis de envio da Printumo
 define( 'PRINTUMO_SHIPPING_PROFILES_API_URL', PRINTUMO_BASE_API_URL . '/shipping_profiles' );
+
+// ====================================================================
+// ATIVAÇÃO DO PLUGIN - CRIAÇÃO DA TABELA DE LOGS DE ERRO
+// ====================================================================
+
+/**
+ * Creates the custom database table for error logs upon plugin activation.
+ */
+function printumo_activate_plugin() {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'printumo_error_logs';
+
+    $charset_collate = $wpdb->get_charset_collate();
+
+    // SQL to create the table
+    $sql = "CREATE TABLE $table_name (
+        id bigint(20) NOT NULL AUTO_INCREMENT,
+        timestamp datetime DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        type varchar(50) NOT NULL,
+        message text NOT NULL,
+        details longtext,
+        PRIMARY KEY (id)
+    ) $charset_collate;";
+
+    // Include upgrade.php for dbDelta()
+    require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
+    dbDelta( $sql );
+}
+register_activation_hook( __FILE__, 'printumo_activate_plugin' );
+
+// ====================================================================
+// FUNÇÃO PARA REGISTRAR ERROS NO BANCO DE DADOS
+// ====================================================================
+
+/**
+ * Logs an error message to the custom database table.
+ *
+ * @param string $type    Type of error (e.g., 'webhook', 'api_product', 'api_shipping').
+ * @param string $message A brief message describing the error.
+ * @param array  $details Optional: An array of additional details to store (e.g., payload, response).
+ */
+function printumo_log_error( $type, $message, $details = array() ) {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'printumo_error_logs';
+
+    $wpdb->insert(
+        $table_name,
+        array(
+            'timestamp' => current_time( 'mysql' ),
+            'type'      => sanitize_text_field( $type ),
+            'message'   => sanitize_textarea_field( $message ),
+            'details'   => wp_json_encode( $details ), // Store details as JSON
+        ),
+        array( '%s', '%s', '%s', '%s' )
+    );
+}
+
 
 // ====================================================================
 // REGISTRO DOS ENDPOINTS REST PARA OS WEBHOOKS E FERRAMENTAS
@@ -100,8 +157,10 @@ function printumo_handle_webhook_data( WP_REST_Request $request ) {
     $trigger_status = get_option( 'printumo_order_trigger_status', 'pronto-para-printumo' ); // Default if not set
 
     if ( empty( $printumo_api_key ) ) {
-        error_log( 'Printumo Webhook Error: Printumo API Key is not configured in plugin settings.' );
-        return new WP_REST_Response( array( 'success' => false, 'message' => 'Printumo API Key not configured.' ), 500 );
+        $message = 'Printumo API Key is not configured in plugin settings.';
+        error_log( 'Printumo Webhook Error: ' . $message );
+        printumo_log_error( 'config_error', $message );
+        return new WP_REST_Response( array( 'success' => false, 'message' => $message ), 500 );
     }
 
     // Log the full payload for debugging purposes.
@@ -109,8 +168,10 @@ function printumo_handle_webhook_data( WP_REST_Request $request ) {
 
     // Check if essential order data is present in the payload.
     if ( ! isset( $payload['order'] ) || ! isset( $payload['order']['status'] ) ) {
-        error_log( 'Printumo Webhook Error: Missing order data or status in payload.' );
-        return new WP_REST_Response( array( 'success' => false, 'message' => 'Missing order data.' ), 400 );
+        $message = 'Missing order data or status in payload.';
+        error_log( 'Printumo Webhook Error: ' . $message );
+        printumo_log_error( 'webhook_data_error', $message, array( 'payload' => $payload ) );
+        return new WP_REST_Response( array( 'success' => false, 'message' => $message ), 400 );
     }
 
     $order_data = $payload['order'];
@@ -140,7 +201,9 @@ function printumo_handle_webhook_data( WP_REST_Request $request ) {
         $printumo_variant_id = get_post_meta( $product_id_woo, '_printumo_variant_id', true );
 
         if ( empty( $printumo_variant_id ) ) {
-            error_log( "Printumo Webhook Error: WooCommerce Product ID {$product_id_woo} (from Order {$order_id}) has no Printumo variant ID mapped. This item will be skipped." );
+            $message = "WooCommerce Product ID {$product_id_woo} (from Order {$order_id}) has no Printumo variant ID mapped. This item will be skipped.";
+            error_log( "Printumo Webhook Error: " . $message );
+            printumo_log_error( 'product_mapping_error', $message, array( 'order_id' => $order_id, 'product_id_woo' => $product_id_woo ) );
             // You can choose to skip this item or return an error for the entire order.
             continue;
         }
@@ -153,8 +216,10 @@ function printumo_handle_webhook_data( WP_REST_Request $request ) {
 
     // If no valid line items were found after mapping, do not send the order.
     if ( empty( $printumo_line_items ) ) {
-        error_log( "Printumo Webhook Error: No valid line items with Printumo Variant IDs found for Order {$order_id}. Order not sent." );
-        return new WP_REST_Response( array( 'success' => false, 'message' => 'No valid line items for Printumo found after mapping.' ), 400 );
+        $message = "No valid line items with Printumo Variant IDs found for Order {$order_id}. Order not sent.";
+        error_log( "Printumo Webhook Error: " . $message );
+        printumo_log_error( 'empty_line_items', $message, array( 'order_id' => $order_id ) );
+        return new WP_REST_Response( array( 'success' => false, 'message' => $message ), 400 );
     }
 
     // Prepare the shipping address in Printumo's required format.
@@ -189,6 +254,7 @@ function printumo_handle_webhook_data( WP_REST_Request $request ) {
     if ( is_wp_error( $response ) ) {
         $error_message = $response->get_error_message();
         error_log( "Printumo API Connection Error for Order {$order_id}: " . $error_message );
+        printumo_log_error( 'api_connection_error', "Failed to connect to Printumo API for Order {$order_id}: " . $error_message, array( 'order_id' => $order_id, 'payload' => $printumo_payload ) );
         return new WP_REST_Response( array( 'success' => false, 'message' => 'Failed to connect to Printumo API: ' . $error_message ), 500 );
     }
 
@@ -209,7 +275,9 @@ function printumo_handle_webhook_data( WP_REST_Request $request ) {
         // Printumo API returned an error.
         $error_details = isset( $data['error'] ) ? $data['error'] : 'Unknown error';
         $errors_array = isset( $data['errors'] ) ? implode( ', ', $data['errors'] ) : '';
-        error_log( "Printumo API Failure for Order {$order_id} (Status: {$status_code}): {$error_details} - {$errors_array}" );
+        $message = "Printumo API Failure for Order {$order_id} (Status: {$status_code}): {$error_details} - {$errors_array}";
+        error_log( $message );
+        printumo_log_error( 'api_response_error', $message, array( 'order_id' => $order_id, 'status_code' => $status_code, 'response_body' => $body, 'payload' => $printumo_payload ) );
         return new WP_REST_Response( array( 'success' => false, 'message' => 'Printumo API error: ' . $error_details . ' ' . $errors_array ), $status_code );
     }
 }
@@ -227,7 +295,9 @@ function printumo_handle_webhook_data( WP_REST_Request $request ) {
 function printumo_fetch_products_from_api( WP_REST_Request $request ) {
     $printumo_api_key = get_option( 'printumo_api_key' );
     if ( empty( $printumo_api_key ) ) {
-        return new WP_REST_Response( array( 'success' => false, 'message' => 'Printumo API Key is not configured in plugin settings.' ), 500 );
+        $message = 'Printumo API Key is not configured in plugin settings.';
+        printumo_log_error( 'config_error', $message );
+        return new WP_REST_Response( array( 'success' => false, 'message' => $message ), 500 );
     }
 
     $response = wp_remote_get( PRINTUMO_PRODUCTS_API_URL, array(
@@ -240,6 +310,7 @@ function printumo_fetch_products_from_api( WP_REST_Request $request ) {
     if ( is_wp_error( $response ) ) {
         $error_message = $response->get_error_message();
         error_log( "Printumo API Connection Error (Products): " . $error_message );
+        printumo_log_error( 'api_connection_error', "Failed to connect to Printumo API (Products): " . $error_message, array( 'endpoint' => 'products' ) );
         return new WP_REST_Response( array( 'success' => false, 'message' => 'Failed to connect to Printumo API (Products): ' . $error_message ), 500 );
     }
 
@@ -253,7 +324,9 @@ function printumo_fetch_products_from_api( WP_REST_Request $request ) {
     } else {
         $error_details = isset( $data['error'] ) ? $data['error'] : 'Unknown error';
         $errors_array = isset( $data['errors'] ) ? implode( ', ', $data['errors'] ) : '';
-        error_log( "Printumo API Failure (Products) (Status: {$status_code}): {$error_details} - {$errors_array}" );
+        $message = "Printumo API Failure (Products) (Status: {$status_code}): {$error_details} - {$errors_array}";
+        error_log( $message );
+        printumo_log_error( 'api_response_error', $message, array( 'endpoint' => 'products', 'status_code' => $status_code, 'response_body' => $body ) );
         return new WP_REST_Response( array( 'success' => false, 'message' => 'Printumo API error (Products): ' . $error_details . ' ' . $errors_array ), $status_code );
     }
 }
@@ -267,7 +340,9 @@ function printumo_fetch_products_from_api( WP_REST_Request $request ) {
 function printumo_fetch_shipping_profiles_from_api( WP_REST_Request $request ) {
     $printumo_api_key = get_option( 'printumo_api_key' );
     if ( empty( $printumo_api_key ) ) {
-        return new WP_REST_Response( array( 'success' => false, 'message' => 'Printumo API Key is not configured in plugin settings.' ), 500 );
+        $message = 'Printumo API Key is not configured in plugin settings.';
+        printumo_log_error( 'config_error', $message );
+        return new WP_REST_Response( array( 'success' => false, 'message' => $message ), 500 );
     }
 
     $response = wp_remote_get( PRINTUMO_SHIPPING_PROFILES_API_URL, array(
@@ -280,6 +355,7 @@ function printumo_fetch_shipping_profiles_from_api( WP_REST_Request $request ) {
     if ( is_wp_error( $response ) ) {
         $error_message = $response->get_error_message();
         error_log( "Printumo API Connection Error (Shipping Profiles): " . $error_message );
+        printumo_log_error( 'api_connection_error', "Failed to connect to Printumo API (Shipping Profiles): " . $error_message, array( 'endpoint' => 'shipping_profiles' ) );
         return new WP_REST_Response( array( 'success' => false, 'message' => 'Failed to connect to Printumo API (Shipping Profiles): ' . $error_message ), 500 );
     }
 
@@ -293,7 +369,9 @@ function printumo_fetch_shipping_profiles_from_api( WP_REST_Request $request ) {
     } else {
         $error_details = isset( $data['error'] ) ? $data['error'] : 'Unknown error';
         $errors_array = isset( $data['errors'] ) ? implode( ', ', $data['errors'] ) : '';
-        error_log( "Printumo API Failure (Shipping Profiles) (Status: {$status_code}): {$error_details} - {$errors_array}" );
+        $message = "Printumo API Failure (Shipping Profiles) (Status: {$status_code}): {$error_details} - {$errors_array}";
+        error_log( $message );
+        printumo_log_error( 'api_response_error', $message, array( 'endpoint' => 'shipping_profiles', 'status_code' => $status_code, 'response_body' => $body ) );
         return new WP_REST_Response( array( 'success' => false, 'message' => 'Printumo API error (Shipping Profiles): ' . $error_details . ' ' . $errors_array ), $status_code );
     }
 }
@@ -480,6 +558,7 @@ function printumo_tools_page_content() {
         <h2 class="nav-tab-wrapper">
             <a href="?page=printumo-tools&tab=settings" class="nav-tab <?php echo ( ! isset( $_GET['tab'] ) || $_GET['tab'] == 'settings' ) ? 'nav-tab-active' : ''; ?>"><?php _e( 'Settings', 'printumo-integration' ); ?></a>
             <a href="?page=printumo-tools&tab=tools" class="nav-tab <?php echo ( isset( $_GET['tab'] ) && $_GET['tab'] == 'tools' ) ? 'nav-tab-active' : ''; ?>"><?php _e( 'Tools', 'printumo-integration' ); ?></a>
+            <a href="?page=printumo-tools&tab=error-log" class="nav-tab <?php echo ( isset( $_GET['tab'] ) && $_GET['tab'] == 'error-log' ) ? 'nav-tab-active' : ''; ?>"><?php _e( 'Error Log', 'printumo-integration' ); ?></a>
         </h2>
 
         <?php
@@ -495,7 +574,7 @@ function printumo_tools_page_content() {
                 ?>
             </form>
             <?php
-        } else { // 'tools' tab
+        } elseif ( 'tools' == $active_tab ) {
             ?>
             <hr>
 
@@ -577,11 +656,99 @@ function printumo_tools_page_content() {
                 });
             </script>
             <?php
+        } else { // 'error-log' tab
+            printumo_display_error_log_table();
         }
         ?>
     </div>
     <?php
 }
+
+/**
+ * Displays the error log table in the admin page.
+ */
+function printumo_display_error_log_table() {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'printumo_error_logs';
+    $per_page = 20; // Number of logs per page
+    $current_page = isset( $_GET['paged'] ) ? max( 1, intval( $_GET['paged'] ) ) : 1;
+    $offset = ( $current_page - 1 ) * $per_page;
+
+    // Get total number of logs
+    $total_logs = $wpdb->get_var( "SELECT COUNT(id) FROM $table_name" );
+
+    // Get logs for the current page
+    $logs = $wpdb->get_results(
+        $wpdb->prepare(
+            "SELECT * FROM $table_name ORDER BY timestamp DESC LIMIT %d OFFSET %d",
+            $per_page,
+            $offset
+        ),
+        ARRAY_A
+    );
+
+    ?>
+    <hr>
+    <h2><?php _e( 'Printumo Error Log', 'printumo-integration' ); ?></h2>
+    <p><?php _e( 'This table displays errors encountered during Printumo API interactions.', 'printumo-integration' ); ?></p>
+
+    <?php if ( empty( $logs ) ) : ?>
+        <p><?php _e( 'No errors logged yet.', 'printumo-integration' ); ?></p>
+    <?php else : ?>
+        <table class="wp-list-table widefat fixed striped">
+            <thead>
+                <tr>
+                    <th scope="col"><?php _e( 'ID', 'printumo-integration' ); ?></th>
+                    <th scope="col"><?php _e( 'Timestamp', 'printumo-integration' ); ?></th>
+                    <th scope="col"><?php _e( 'Type', 'printumo-integration' ); ?></th>
+                    <th scope="col"><?php _e( 'Message', 'printumo-integration' ); ?></th>
+                    <th scope="col"><?php _e( 'Details', 'printumo-integration' ); ?></th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ( $logs as $log ) : ?>
+                    <tr>
+                        <td><?php echo esc_html( $log['id'] ); ?></td>
+                        <td><?php echo esc_html( $log['timestamp'] ); ?></td>
+                        <td><?php echo esc_html( $log['type'] ); ?></td>
+                        <td><?php echo esc_html( $log['message'] ); ?></td>
+                        <td>
+                            <?php
+                            $details = json_decode( $log['details'], true );
+                            if ( ! empty( $details ) ) {
+                                echo '<pre style="max-height: 150px; overflow-y: auto; background-color: #fff; padding: 10px; border: 1px solid #ddd; border-radius: 3px;">' . esc_html( wp_json_encode( $details, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) ) . '</pre>';
+                            } else {
+                                echo '<em>' . esc_html__( 'No additional details.', 'printumo-integration' ) . '</em>';
+                            }
+                            ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+
+        <?php
+        // Pagination
+        $total_pages = ceil( $total_logs / $per_page );
+        if ( $total_pages > 1 ) {
+            echo '<div class="tablenav"><div class="tablenav-pages">';
+            $page_links = paginate_links( array(
+                'base'      => add_query_arg( 'paged', '%#%' ),
+                'format'    => '',
+                'prev_text' => '&laquo;',
+                'next_text' => '&raquo;',
+                'total'     => $total_pages,
+                'current'   => $current_page,
+                'add_args'  => array( 'tab' => 'error-log' ), // Keep the 'error-log' tab active
+            ));
+            echo $page_links;
+            echo '</div></div>';
+        }
+        ?>
+    <?php endif; ?>
+    <?php
+}
+
 
 /**
  * Enqueues necessary scripts for the admin page.
